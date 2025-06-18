@@ -1,0 +1,759 @@
+// ************************************* AXI4_LITE TESTBENCH *************************************************//
+
+//-------------------------- INTERFACE ------------------------------------//
+
+`timescale 1ns / 1ps
+ 
+`include "uvm_macros.svh"
+ import uvm_pkg::*;
+
+//-----------------------------------------------
+interface axi4lite_if(input bit clk, input bit rstn);
+  logic [31:0] AWADDR, WDATA, ARADDR;
+  logic        AWVALID, WVALID, ARVALID;
+  logic        AWREADY, WREADY, ARREADY;
+  logic        BVALID, RVALID;
+  logic        BREADY, RREADY;
+  logic [1:0]  BRESP, RRESP;
+  logic [31:0] RDATA;
+  logic [3:0]  WSTRB;
+
+  // Modport for driver (master-side driving)
+  modport drv_mp (
+    input  clk, rstn,
+    output AWADDR, WDATA, ARADDR,
+           AWVALID, WVALID, ARVALID, WSTRB,
+           BREADY, RREADY,
+    input  AWREADY, WREADY, ARREADY,
+           BVALID, RVALID, BRESP, RRESP, RDATA
+  );
+
+  // Modport for monitor (observe everything)
+  modport mon_mp (
+    input  clk, rstn,
+           AWADDR, WDATA, ARADDR,
+           AWVALID, WVALID, ARVALID,
+           AWREADY, WREADY, ARREADY,
+           BVALID, RVALID, BREADY, RREADY,
+           BRESP, RRESP, RDATA, WSTRB
+  );
+endinterface
+
+//-------------------------- CONFIG CLASS ------------------------------------//
+
+class axi4lite_config extends uvm_object; /////configuration of env
+  `uvm_object_utils(axi4lite_config)
+  
+  virtual axi4lite_if vif;
+  
+  function new(string name = "axi4lite_config");
+    super.new(name);
+  endfunction
+  
+  uvm_active_passive_enum is_active = UVM_ACTIVE;
+  
+endclass
+ 
+//-------------------------- TRANSACTION CLASS ------------------------------------//
+  
+typedef enum bit [1:0]   {readd = 0, writed = 1, rst = 2} oper_mode;
+//////////////////////////////////////////////////////////////////////////////////
+ 
+class axi4lite_transaction extends uvm_sequence_item;
+   
+    rand oper_mode   op;
+    rand logic [31:0] addr;
+	rand logic [31:0] data;
+	rand logic        write; // 1=write, 0=read
+	logic [31:0]      rdata;
+ 
+        `uvm_object_utils_begin(axi4lite_transaction)
+        `uvm_field_int(addr,	  UVM_ALL_ON)
+		`uvm_field_int(data,      UVM_ALL_ON)
+		`uvm_field_int(write,     UVM_ALL_ON)
+		`uvm_field_int(rdata, UVM_ALL_ON)
+        `uvm_field_enum(oper_mode, op, UVM_DEFAULT)
+        `uvm_object_utils_end
+  
+	constraint addr_c { addr <= 15; }
+	constraint wdata_c { data <= 15; }
+	constraint addr_c_err { addr == 32'hffff_ffff;}		//> 31; }
+ 
+	function new(string name = "axi4lite_transaction");
+		super.new(name);
+	endfunction
+ 
+endclass : axi4lite_transaction
+ 
+//-------------------------- COVERAGE CLASS -----------------------------------//
+
+   class axi4lite_coverage extends uvm_subscriber #(axi4lite_transaction);
+  `uvm_component_utils(axi4lite_coverage)
+
+	axi4lite_transaction tr;
+
+  // Coverage group
+  covergroup axi4lite_cg;//@(tr.addr, tr.data, tr.write);
+    option.per_instance = 1;
+
+    addr_cp: coverpoint tr.addr {
+      bins low_range[]   = {[0:8]};
+      bins mid_range[]   = {[9:15]};
+      bins high_range[]  = {32'hffff_ffff};
+    }
+
+    data_cp: coverpoint tr.data {
+      bins zero          = {[0:14]};
+      bins max_val       = {15};
+     // bins some_values[] = {[1:100]};
+    }
+
+    rw_cp: coverpoint tr.write {
+      bins write = {1};
+      bins read  = {0};
+    }
+
+    cross_rw_addr: cross rw_cp, addr_cp;
+  endgroup
+  
+  // Constructor
+  function new(string name, uvm_component parent);
+    super.new(name, parent);
+	axi4lite_cg = new;
+  endfunction
+
+  // Build phase
+  function void build_phase(uvm_phase phase); 
+    super.build_phase(phase);
+	tr = axi4lite_transaction::type_id::create("tr", this);
+    
+  endfunction
+
+  // Write callback from monitor
+ virtual function void write(input axi4lite_transaction t);
+    tr = t; // shallow copy
+    axi4lite_cg.sample();
+
+    `uvm_info("COV_WRITE", $sformatf("Sampled: %s Addr=0x%0h Data=0x%0h",
+      t.write ? "WRITE" : "READ", t.addr, t.write ? t.data : t.rdata), UVM_LOW)
+  endfunction
+  
+  virtual function void extract_phase(uvm_phase phase);
+  super.extract_phase(phase);
+
+  // Print total samples of covergroup (not 'write')
+  `uvm_info("COV", $sformatf("Total samples captured for coverage: %f", axi4lite_cg.get_inst_coverage()), UVM_NONE)
+
+  // Print last transaction sampled
+  `uvm_info("COV", $sformatf("Last transaction => op: %s, Addr: %0h, Write_data: %0h, Read_data: %0h",
+    tr.op.name(), tr.addr, tr.data, tr.rdata), UVM_NONE)
+endfunction
+endclass
+
+//-------------------------- ALL SEQUENCES ------------------------------------//
+
+class write_data extends uvm_sequence#(axi4lite_transaction);
+  `uvm_object_utils(write_data)
+  
+  axi4lite_transaction tr;
+ 
+  function new(string name = "write_data");
+    super.new(name);
+  endfunction
+  
+  virtual task body();
+    repeat(15)
+      begin
+        tr = axi4lite_transaction::type_id::create("tr");
+        tr.addr_c.constraint_mode(1);//enable 
+        tr.addr_c_err.constraint_mode(0);//disable
+        start_item(tr);
+        assert(tr.randomize);
+        tr.op = writed;
+        finish_item(tr);
+      end
+  endtask
+  
+ 
+endclass
+
+////////////////////////read seq/////////////////////////////
+
+class read_data extends uvm_sequence#(axi4lite_transaction);
+  `uvm_object_utils(read_data)
+  
+  axi4lite_transaction tr;
+ 
+  function new(string name = "read_data");
+    super.new(name);
+  endfunction
+  
+  virtual task body();
+    repeat(15)
+      begin
+        tr = axi4lite_transaction::type_id::create("tr");
+        tr.addr_c.constraint_mode(1);
+        tr.addr_c_err.constraint_mode(0);//disable
+        start_item(tr);
+        assert(tr.randomize);
+        tr.op = readd;
+        finish_item(tr);
+      end
+  endtask
+  
+ 
+endclass
+ 
+//////////////////////WRITE READ SEQ ///////////////////////
+
+class write_read extends uvm_sequence#(axi4lite_transaction); //////read after write
+  `uvm_object_utils(write_read)
+  
+  axi4lite_transaction tr;
+ 
+  function new(string name = "write_read");
+    super.new(name);
+  endfunction
+  
+  virtual task body();
+    repeat(15)
+      begin
+        tr = axi4lite_transaction::type_id::create("tr");
+        tr.addr_c.constraint_mode(1);
+        tr.addr_c_err.constraint_mode(0);
+        
+        start_item(tr);
+        assert(tr.randomize);
+        tr.op = writed;
+        finish_item(tr);
+        
+        start_item(tr);
+        assert(tr.randomize);
+        tr.op = readd;
+        finish_item(tr);
+ 
+      end
+  endtask
+  
+ 
+endclass
+
+///////////////write bulk read bulk /////////////////////////////
+
+class writeb_readb extends uvm_sequence#(axi4lite_transaction);
+  `uvm_object_utils(writeb_readb)
+  
+  axi4lite_transaction tr;
+ 
+  function new(string name = "writeb_readb");
+    super.new(name);
+  endfunction
+  
+  virtual task body();
+   fork 
+    repeat(15) begin
+        tr = axi4lite_transaction::type_id::create("tr");
+        tr.addr_c.constraint_mode(1);
+        tr.addr_c_err.constraint_mode(0);
+        
+        start_item(tr);
+        assert(tr.randomize);
+        tr.op = writed;
+        finish_item(tr);
+      
+      
+    end
+      
+      
+    repeat(15) begin
+        tr = axi4lite_transaction::type_id::create("tr");
+        tr.addr_c.constraint_mode(1);
+        tr.addr_c_err.constraint_mode(0);
+        
+        start_item(tr);
+        assert(tr.randomize);
+        tr.op = readd;
+        finish_item(tr);
+      
+    end
+   join
+  endtask
+  
+ 
+endclass
+ 
+//////////////////////slv_error_write ///////////////////////////
+
+class write_err extends uvm_sequence#(axi4lite_transaction);
+  `uvm_object_utils(write_err)
+  
+  axi4lite_transaction tr;
+ 
+  function new(string name = "write_err");
+    super.new(name);
+  endfunction
+  
+  virtual task body();
+    repeat(15)
+      begin
+        tr = axi4lite_transaction::type_id::create("tr");
+        tr.addr_c.constraint_mode(0);
+        tr.addr_c_err.constraint_mode(1);
+        
+        start_item(tr);
+        assert(tr.randomize);
+        tr.op = writed;
+        finish_item(tr);
+      end
+  endtask
+  
+ 
+endclass
+
+/////////////////////////read err //////////////////////////////
+  
+class read_err extends uvm_sequence#(axi4lite_transaction);
+  `uvm_object_utils(read_err)
+  
+  axi4lite_transaction tr;
+ 
+  function new(string name = "read_err");
+    super.new(name);
+  endfunction
+  
+  virtual task body();
+    repeat(15)
+      begin
+        tr = axi4lite_transaction::type_id::create("tr");
+        tr.addr_c.constraint_mode(0);
+        tr.addr_c_err.constraint_mode(1);
+        
+        start_item(tr);
+        assert(tr.randomize);
+        tr.op = readd;
+        finish_item(tr);
+      end
+  endtask
+  
+ 
+endclass
+ 
+////////////////////////// RESET /////////////////////////
+ 
+class reset_dut extends uvm_sequence#(axi4lite_transaction);
+  `uvm_object_utils(reset_dut)
+  
+  axi4lite_transaction tr;
+ 
+  function new(string name = "reset_dut");
+    super.new(name);
+  endfunction
+  
+  virtual task body();
+    repeat(15)
+      begin
+        tr = axi4lite_transaction::type_id::create("tr");
+        tr.addr_c.constraint_mode(1);
+        tr.addr_c_err.constraint_mode(0);
+        
+        start_item(tr);
+        assert(tr.randomize);
+        tr.op = rst;
+        finish_item(tr);
+      end
+  endtask
+  
+ 
+endclass
+ 
+ //-------------------------- DRIVER CLASS ------------------------------------//
+
+class axi4lite_driver extends uvm_driver #(axi4lite_transaction);
+  `uvm_component_utils(axi4lite_driver)
+  
+  virtual axi4lite_if vif;
+  axi4lite_transaction tr;
+  
+  
+  function new(input string path = "axi4lite_driver", uvm_component parent = null);
+    super.new(path,parent);
+  endfunction
+  
+ virtual function void build_phase(uvm_phase phase);
+    super.build_phase(phase);
+     tr = axi4lite_transaction::type_id::create("tr");
+      
+      if(!uvm_config_db#(virtual axi4lite_if)::get(this,"","vif",vif))//uvm_test_top.env.agent.drv.aif
+      `uvm_error("drv","Unable to access Interface");
+  endfunction
+  
+  
+  
+  task reset_dut();
+ 
+	vif.rstn		  <= 'b0;
+    vif.AWADDR    <= 'h0;
+    vif.WDATA     <= 'h0;
+    vif.AWVALID   <= 'b0;
+    vif.WVALID    <= 'b0;
+    vif.ARVALID   <= 'b0;
+     `uvm_info("DRV", "System Reset : Start of Simulation", UVM_MEDIUM);
+    repeat(5) @(posedge vif.clk);
+    vif.rstn		  <= 'b1;
+	
+  endtask
+  
+  task drive();
+    reset_dut();
+   forever begin
+     
+         seq_item_port.get_next_item(tr);
+			fork
+     
+                   if(tr.op ==  rst)
+                          begin
+                            	vif.rstn		  <= 'b0;
+								vif.AWADDR    <= 'h0;
+								vif.WDATA     <= 'h0;
+								vif.AWVALID   <= 'b0;
+								vif.WVALID    <= 'b0;
+								vif.ARVALID   <= 'b0;
+								repeat(2) @(posedge vif.clk);
+								vif.rstn		  <= 'b1;
+								@(posedge vif.clk);
+                          end
+ 
+                  if(tr.op == writed)
+                          begin
+                          vif.AWADDR <= tr.addr;
+						  vif.AWVALID <= 1;
+						  @(posedge vif.clk);
+						  wait (vif.AWREADY == 1);
+						  @(posedge vif.clk);
+						  vif.AWVALID <= 0;
+					  
+						  // Drive Write Data channel
+						  vif.WDATA <= tr.data;
+						  vif.WVALID <= 1;
+						  vif.WSTRB <= 4'hF;  // assuming all byte lanes are valid
+						  @(posedge vif.clk);
+						  wait (vif.WREADY == 1);
+						  @(posedge vif.clk);
+						  vif.WVALID <= 0;
+                            `uvm_info("DRV", $sformatf("mode:%0s, AWADDR:%0d, WDATA:%0d",tr.op.name(),tr.addr,tr.data), UVM_NONE);
+						  // Accept Write Response
+						  vif.BREADY <= 1;
+						  @(posedge vif.clk);
+						  wait (vif.BVALID == 1);
+						  @(posedge vif.clk);
+						  vif.BREADY <= 0; 
+                      
+                          end
+     
+                     if(tr.op ==  readd)
+                          begin
+                          vif.ARADDR <= tr.addr;
+						  vif.ARVALID <= 1;
+						  @(posedge vif.clk);
+						  wait (vif.ARREADY == 1);
+						  @(posedge vif.clk);
+						  vif.ARVALID <= 0;
+						  // Accept Read Data
+						  vif.RREADY <= 1;
+						  @(posedge vif.clk);
+						  wait (vif.RVALID == 1);
+						  tr.data = vif.RDATA;
+						  @(posedge vif.clk);
+						  `uvm_info("DRV", $sformatf("mode:%0s, ARADDR:%0d, RDATA:%0d",tr.op.name(),tr.addr,tr.data), UVM_NONE);
+						  vif.RREADY <= 0;  
+                            
+                          end
+			join
+       seq_item_port.item_done();
+     
+   end
+  endtask
+  
+ 
+  virtual task run_phase(uvm_phase phase);
+    drive();
+  endtask
+ 
+endclass
+ 
+//-------------------------- MONITOR CLASS ------------------------------------//
+ 
+class axi4lite_monitor extends uvm_monitor;
+`uvm_component_utils(axi4lite_monitor)
+ 
+uvm_analysis_port#(axi4lite_transaction) send;
+axi4lite_transaction tr;
+virtual axi4lite_if vif;
+axi4lite_coverage coverage;
+ 
+    function new(input string inst = "axi4lite_monitor", uvm_component parent = null);
+    super.new(inst,parent);
+    endfunction
+    
+    virtual function void build_phase(uvm_phase phase);
+    super.build_phase(phase);
+    //tr = axi4lite_transaction::type_id::create("tr");
+    coverage = axi4lite_coverage::type_id::create("coverage", this);
+    send = new("send", this);
+      if(!uvm_config_db#(virtual axi4lite_if)::get(this,"","vif",vif))//uvm_test_top.env.agent.drv.aif
+        `uvm_error("axi4lite_monitor","Unable to access Interface");
+    endfunction
+    
+    
+    virtual task run_phase(uvm_phase phase);
+    forever begin
+      @(posedge vif.clk);
+	  fork
+      if(!vif.rstn)
+        begin
+		tr = axi4lite_transaction::type_id::create("tr", this);
+        tr.op      = rst; 
+        `uvm_info("axi4lite_monitor", "SYSTEM RESET DETECTED", UVM_NONE);
+         send.write(tr);
+          coverage.write(tr);
+        end
+       // Monitor Write Transaction (AW channel handshake)
+      if (vif.AWVALID && vif.AWREADY) begin
+        tr = axi4lite_transaction::type_id::create("tr", this);
+		tr.op      = writed;
+        tr.addr = vif.AWADDR;
+        tr.write = 1;
+        // Wait for the write data channel handshake
+        wait(vif.WVALID && vif.WREADY);
+        tr.data = vif.WDATA;
+		`uvm_info("MON", $sformatf(" WRITE Mode, AWADDR:%0d, WDATA:%0d",tr.addr,tr.data), UVM_NONE);
+		  send.write(tr);
+		  coverage.write(tr);
+      end
+      if (vif.ARVALID && vif.ARREADY) begin
+        tr = axi4lite_transaction::type_id::create("tr", this);
+		tr.op      = readd;
+        tr.addr = vif.ARADDR;
+        tr.write = 0;
+        // Wait for the read data channel handshake
+        wait(vif.RVALID && vif.RREADY);
+        tr.rdata = vif.RDATA;
+		`uvm_info("MON", $sformatf("READ Mode, ARADDR:%0d, RDATA:%0d",tr.addr,tr.rdata), UVM_NONE);				  
+        send.write(tr);
+		coverage.write(tr);
+      end
+	join
+    
+   end
+ endtask 
+ 
+endclass
+ 
+//-------------------------- SCOREBOARD CLASS ------------------------------------//
+ 
+class axi4lite_sco extends uvm_scoreboard;
+`uvm_component_utils(axi4lite_sco)
+ 
+  uvm_analysis_imp#(axi4lite_transaction,axi4lite_sco) recv;
+  bit [31:0] arr[32] = '{default:0};
+  bit [31:0] addr    = 0;
+  bit [31:0] data_rd = 0;
+ 
+ 
+    function new(input string inst = "axi4lite_sco", uvm_component parent = null);
+    super.new(inst,parent);
+    endfunction
+    
+    virtual function void build_phase(uvm_phase phase);
+    super.build_phase(phase);
+    recv = new("recv", this);
+    endfunction
+    
+    
+  virtual function void write(axi4lite_transaction tr);
+    if(tr.op == rst)
+              begin
+                `uvm_info("axi4lite_sco", "SYSTEM RESET DETECTED", UVM_NONE);
+              end  
+    if (tr.op == writed)
+      begin
+            arr[tr.addr] = tr.data;
+            `uvm_info("axi4lite_sco", $sformatf("DATA WRITE OP  addr:%0d, wdata:%0d arr_wr:%0d",tr.addr,tr.data,  arr[tr.addr]), UVM_NONE);
+      end
+    if (tr.op == readd)
+      begin
+           data_rd = arr[tr.addr];
+      	   if (data_rd == tr.rdata)
+      		 `uvm_info("axi4lite_sco", $sformatf("DATA MATCHED : addr:%0d, rdata:%0d",tr.addr,tr.rdata), UVM_NONE)
+           else
+              `uvm_info("axi4lite_sco",$sformatf("TEST FAILED : addr:%0d, rdata:%0d data_rd_arr:%0d",tr.addr,tr.rdata,data_rd), UVM_NONE) 
+      end
+     
+  
+    $display("----------------------------------------------------------------");
+   endfunction
+ 
+endclass
+ 
+//-------------------------- AGENT CLASS ------------------------------------//
+ 
+class axi4lite_agent extends uvm_agent;
+`uvm_component_utils(axi4lite_agent)
+  
+  axi4lite_config cfg;
+  
+  axi4lite_driver d;
+  uvm_sequencer#(axi4lite_transaction) seqr;
+  axi4lite_monitor m;
+  
+function new(input string inst = "axi4lite_agent", uvm_component parent = null);
+super.new(inst,parent);
+endfunction
+ 
+ 
+virtual function void build_phase(uvm_phase phase);
+super.build_phase(phase);
+  cfg =  axi4lite_config::type_id::create("cfg"); 
+   m = axi4lite_monitor::type_id::create("m",this);
+  
+  if(cfg.is_active == UVM_ACTIVE)
+   begin   
+   d = axi4lite_driver::type_id::create("d",this);
+   seqr = uvm_sequencer#(axi4lite_transaction)::type_id::create("seqr", this);
+   end
+  
+  
+endfunction
+ 
+virtual function void connect_phase(uvm_phase phase);
+super.connect_phase(phase);
+  if(cfg.is_active == UVM_ACTIVE) begin  
+    d.seq_item_port.connect(seqr.seq_item_export);
+  end
+endfunction
+ 
+endclass
+ 
+//-------------------------- ENVIRONMENT CLASS ------------------------------------//
+ 
+class axi4lite_env extends uvm_env;
+`uvm_component_utils(axi4lite_env)
+ 
+function new(input string inst = "axi4lite_env", uvm_component parent);
+super.new(inst,parent);
+endfunction
+ 
+axi4lite_agent a;
+axi4lite_sco s;
+ 
+virtual function void build_phase(uvm_phase phase);
+super.build_phase(phase);
+  a = axi4lite_agent::type_id::create("a",this);
+  s = axi4lite_sco::type_id::create("s", this);
+endfunction
+ 
+virtual function void connect_phase(uvm_phase phase);
+super.connect_phase(phase);
+a.m.send.connect(s.recv);
+endfunction
+ 
+endclass
+ 
+//-------------------------- TEST CLASS ------------------------------------//
+ 
+class test extends uvm_test;
+`uvm_component_utils(test)
+ 
+function new(input string inst = "test", uvm_component c);
+super.new(inst,c);
+endfunction
+ 
+axi4lite_env e;
+write_read wrrd;
+writeb_readb wrrdb;
+write_data wdata;  
+read_data rdata;
+write_err werr;
+read_err rerr;
+reset_dut rstdut;  
+  
+virtual function void build_phase(uvm_phase phase);
+super.build_phase(phase);
+  e      = axi4lite_env::type_id::create("env",this);
+  wrrd   = write_read::type_id::create("wrrd");
+  wdata  = write_data::type_id::create("wdata");
+  rdata  = read_data::type_id::create("rdata");
+  wrrdb  = writeb_readb::type_id::create("wrrdb");
+  werr   = write_err::type_id::create("werr");
+  rerr   = read_err::type_id::create("rerr");
+  rstdut = reset_dut::type_id::create("rstdut");
+endfunction
+ 
+virtual task run_phase(uvm_phase phase);
+
+phase.raise_objection(this);
+  //fork
+  wrrd.start(e.a.seqr);
+  wdata.start(e.a.seqr);
+  rdata.start(e.a.seqr);
+  wrrdb.start(e.a.seqr);
+  werr.start(e.a.seqr);
+  rerr.start(e.a.seqr);
+  rstdut.start(e.a.seqr);
+  //join
+phase.drop_objection(this);
+
+endtask
+endclass
+ 
+//-------------------------- TB TOP ------------------------------------//
+
+module tb;
+  
+  logic clk, rst;
+  axi4lite_if vif(clk, rst);
+  
+  axi4lite_slave DUT (
+    .ACLK(clk),
+    .ARESETn(~rst),
+    .AWADDR(vif.AWADDR),
+    .AWVALID(vif.AWVALID),
+    .AWREADY(vif.AWREADY),
+    .WDATA(vif.WDATA),
+    .WSTRB(vif.WSTRB),
+    .WVALID(vif.WVALID),
+    .WREADY(vif.WREADY),
+    .BRESP(vif.BRESP),
+    .BVALID(vif.BVALID),
+    .BREADY(vif.BREADY),
+    .ARADDR(vif.ARADDR),
+    .ARVALID(vif.ARVALID),
+    .ARREADY(vif.ARREADY),
+    .RDATA(vif.RDATA),
+    .RRESP(vif.RRESP),
+    .RVALID(vif.RVALID),
+    .RREADY(vif.RREADY)
+  );
+  
+  initial begin
+    clk = 0;
+    forever #5 clk = ~clk;
+  end
+ 
+  
+  
+  initial begin
+    uvm_config_db#(virtual axi4lite_if)::set(null, "*", "vif", vif);
+    run_test("test");
+   end
+  
+  
+  initial begin
+    $dumpfile("dump.vcd");
+    $dumpvars;
+  end
+ 
+  
+endmodule
+
+//-------------------------- END TESTBENCH ------------------------------------//

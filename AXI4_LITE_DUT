@@ -1,0 +1,117 @@
+// --------------------------------------- AXI4_LITE DESIGN CODE  ------------------------------------------------//
+
+module axi4lite_slave #(
+  parameter ADDR_WIDTH = 32,
+  parameter DATA_WIDTH = 32
+)(
+  input  wire                    ACLK,
+  input  wire                    ARESETn,
+
+  // Write Address Channel
+  input  wire [ADDR_WIDTH-1:0]   AWADDR,
+  input  wire                    AWVALID,
+  output reg                     AWREADY,
+
+  // Write Data Channel
+  input  wire [DATA_WIDTH-1:0]   WDATA,
+  input  wire [3:0]              WSTRB,
+  input  wire                    WVALID,
+  output reg                     WREADY,
+
+  // Write Response Channel
+  output reg  [1:0]              BRESP,
+  output reg                     BVALID,
+  input  wire                    BREADY,
+
+  // Read Address Channel
+  input  wire [ADDR_WIDTH-1:0]   ARADDR,
+  input  wire                    ARVALID,
+  output reg                     ARREADY,
+
+  // Read Data Channel
+  output reg  [DATA_WIDTH-1:0]   RDATA,
+  output reg  [1:0]              RRESP,
+  output reg                     RVALID,
+  input  wire                    RREADY
+);
+
+  // Simple 4x 32-bit register file
+  reg [DATA_WIDTH-1:0] regfile [0:3];
+
+  // Internal signals
+  reg [ADDR_WIDTH-1:0] awaddr_reg;
+  reg [ADDR_WIDTH-1:0] araddr_reg;
+
+  // Write address channel
+  always @(posedge ACLK) begin
+    if (!ARESETn) begin
+      AWREADY <= 0;
+      awaddr_reg <= 0;
+    end else begin
+      AWREADY <= ~AWREADY & AWVALID;
+      if (AWVALID & ~AWREADY)
+        awaddr_reg <= AWADDR;
+    end
+  end
+
+  // Write data channel
+  always @(posedge ACLK) begin
+    if (!ARESETn) begin
+      WREADY <= 0;
+      BVALID <= 0;
+      BRESP  <= 2'b00;
+    end else begin
+      WREADY <= ~WREADY & WVALID;
+      if (WVALID & ~WREADY) begin
+        // Decode write address to select register
+        case (awaddr_reg[3:2])
+          2'd0: if (WSTRB[0]) regfile[0] <= WDATA;
+          2'd1: if (WSTRB[0]) regfile[1] <= WDATA;
+          2'd2: if (WSTRB[0]) regfile[2] <= WDATA;
+          2'd3: if (WSTRB[0]) regfile[3] <= WDATA;
+        endcase
+        BVALID <= 1;
+      end
+      if (BVALID & BREADY)
+        BVALID <= 0;
+    end
+  end
+
+  // Read address channel
+  always @(posedge ACLK) begin
+    if (!ARESETn) begin
+      ARREADY <= 0;
+      araddr_reg <= 0;
+    end else begin
+      ARREADY <= ~ARREADY & ARVALID;
+      if (ARVALID & ~ARREADY)
+        araddr_reg <= ARADDR;
+    end
+  end
+
+  // Read data channel
+  always @(posedge ACLK) begin
+    if (!ARESETn) begin
+      RVALID <= 0;
+      RDATA  <= 0;
+      RRESP  <= 2'b00;
+    end else begin
+      if (ARREADY & ARVALID) begin
+        case (araddr_reg[3:2])
+          2'd0: RDATA <= regfile[0];
+          2'd1: RDATA <= regfile[1];
+          2'd2: RDATA <= regfile[2];
+          2'd3: RDATA <= regfile[3];
+          default: RDATA <= 32'hDEADBEEF;
+        endcase
+        RVALID <= 1;
+        RRESP  <= 2'b00; // OKAY
+      end else if (RVALID & RREADY) begin
+        RVALID <= 0;
+      end
+    end
+  end
+
+endmodule
+
+//************************************************ END ******************************************************//
